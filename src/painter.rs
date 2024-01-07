@@ -1,7 +1,7 @@
 use egui::epaint::Vertex;
 use miniquad::{
-    Bindings, BlendFactor, BlendState, BlendValue, Buffer, BufferLayout, BufferType, Context,
-    Equation, GraphicsContext, Pipeline, PipelineParams, Shader, VertexAttribute, VertexFormat,
+    Bindings, BlendFactor, BlendState, BlendValue, BufferId, BufferLayout, BufferType, Context,
+    Equation, GlContext, Pipeline, PipelineParams, ShaderId, VertexAttribute, VertexFormat,
 };
 
 /// A callback function that can be used to compose an [`egui::PaintCallback`] for custom rendering
@@ -15,12 +15,12 @@ use miniquad::{
 /// See the [`custom3d_glow`](https://github.com/emilk/egui/blob/master/crates/egui_demo_app/src/apps/custom3d_wgpu.rs) demo source for a detailed usage example.
 pub struct CallbackFn {
     #[allow(clippy::type_complexity)]
-    f: Box<dyn Fn(egui::PaintCallbackInfo, &mut GraphicsContext) + Sync + Send>,
+    f: Box<dyn Fn(egui::PaintCallbackInfo, &mut Context) + Sync + Send>,
 }
 
 impl CallbackFn {
     pub fn new(
-        callback: impl Fn(egui::PaintCallbackInfo, &mut GraphicsContext) + Sync + Send + 'static,
+        callback: impl Fn(egui::PaintCallbackInfo, &mut Context) + Sync + Send + 'static,
     ) -> Self {
         let f = Box::new(callback);
         CallbackFn { f }
@@ -30,15 +30,20 @@ impl CallbackFn {
 pub struct Painter {
     pipeline: Pipeline,
     bindings: Bindings,
-    textures: std::collections::HashMap<egui::TextureId, miniquad::Texture>,
+    textures: std::collections::HashMap<egui::TextureId, miniquad::TextureId>,
 }
 
 impl Painter {
     pub fn new(ctx: &mut Context) -> Painter {
-        let shader = Shader::new(ctx, shader::VERTEX, shader::FRAGMENT, shader::meta());
+        let shader = ctx.new_shader(
+            miniquad::ShaderSource::Glsl {
+                vertex: shader::VERTEX,
+                fragment: shader::FRAGMENT,
+            },
+            shader::meta(),
+        );
 
-        let pipeline = Pipeline::with_params(
-            ctx,
+        let pipeline = ctx.new_pipeline_with_params(
             &[BufferLayout::default()],
             &[
                 VertexAttribute::new("a_pos", VertexFormat::Float2),
@@ -57,21 +62,29 @@ impl Painter {
             },
         );
 
-        let vertex_buffer = Buffer::stream(
-            ctx,
+        let vertex_buffer = ctx.new_buffer(
             BufferType::VertexBuffer,
-            32 * 1024 * std::mem::size_of::<Vertex>(),
+            miniquad::BufferUsage::Stream,
+            miniquad::BufferSource::Empty {
+                size: 32 * 1024,
+                element_size: std::mem::size_of::<Vertex>(),
+            },
         );
-        let index_buffer = Buffer::stream(
-            ctx,
+        let index_buffer = ctx.new_buffer(
             BufferType::IndexBuffer,
-            32 * 1024 * std::mem::size_of::<u16>(),
+            miniquad::BufferUsage::Stream,
+            miniquad::BufferSource::Empty {
+                size: 32 * 1024,
+                element_size: std::mem::size_of::<u16>(),
+            },
         );
 
         let bindings = Bindings {
             vertex_buffers: vec![vertex_buffer],
             index_buffer,
-            images: vec![miniquad::Texture::empty()],
+            images: vec![ctx.new_render_texture(miniquad::TextureParams {
+                ..Default::default()
+            })],
         };
 
         Painter {
@@ -104,7 +117,7 @@ impl Painter {
                             "Mismatch between texture size and texel count"
                         );
                         let data: &[u8] = bytemuck::cast_slice(image.pixels.as_ref());
-                        texture.update_texture_part(ctx, x as _, y as _, w as _, h as _, data);
+                        ctx.texture_update_part(*texture, x as _, y as _, w as _, h as _, data);
                     }
                     egui::ImageData::Font(image) => {
                         assert_eq!(
@@ -118,7 +131,7 @@ impl Painter {
                             .flat_map(|a| a.to_array())
                             .collect();
 
-                        texture.update_texture_part(ctx, x as _, y as _, w as _, h as _, &data);
+                        ctx.texture_update_part(*texture, x as _, y as _, w as _, h as _, &data);
                     }
                 }
             } else {
@@ -127,11 +140,15 @@ impl Painter {
         } else {
             // New texture (or full update).
             let params = miniquad::TextureParams {
+                kind: miniquad::TextureKind::Texture2D,
                 format: miniquad::TextureFormat::RGBA8,
                 wrap: miniquad::TextureWrap::Clamp,
-                filter,
+                min_filter: filter,
+                mag_filter: filter,
+                mipmap_filter: miniquad::MipmapFilterMode::None,
                 width: w as _,
                 height: h as _,
+                allocate_mipmaps: false,
             };
 
             let texture = match &delta.image {
@@ -142,7 +159,7 @@ impl Painter {
                         "Mismatch between texture size and texel count"
                     );
                     let data: &[u8] = bytemuck::cast_slice(image.pixels.as_ref());
-                    miniquad::Texture::from_data_and_format(ctx, data, params)
+                    ctx.new_texture_from_data_and_format(data, params)
                 }
                 egui::ImageData::Font(image) => {
                     assert_eq!(
@@ -156,20 +173,20 @@ impl Painter {
                         .flat_map(|a| a.to_array())
                         .collect();
 
-                    miniquad::Texture::from_data_and_format(ctx, &data, params)
+                    ctx.new_texture_from_data_and_format(&data, params)
                 }
             };
 
             let previous = self.textures.insert(tex_id, texture);
             if let Some(previous) = previous {
-                previous.delete();
+                ctx.delete_texture(previous);
             }
         }
     }
 
-    pub fn free_texture(&mut self, tex_id: egui::TextureId) {
+    pub fn free_texture(&mut self, ctx: &mut Context, tex_id: egui::TextureId) {
         if let Some(old_tex) = self.textures.remove(&tex_id) {
-            old_tex.delete();
+            ctx.delete_texture(old_tex);
         }
     }
 
@@ -187,7 +204,7 @@ impl Painter {
         self.paint(ctx, primtives, egui_ctx);
 
         for &id in &textures_delta.free {
-            self.free_texture(id);
+            self.free_texture(ctx, id);
         }
     }
 
@@ -200,14 +217,12 @@ impl Painter {
         ctx.begin_default_pass(miniquad::PassAction::Nothing);
         ctx.apply_pipeline(&self.pipeline);
 
-        let screen_size_in_pixels = ctx.screen_size();
+        let screen_size_in_pixels = miniquad::window::screen_size();
         let screen_size_in_points = (
             screen_size_in_pixels.0 / egui_ctx.pixels_per_point(),
             screen_size_in_pixels.1 / egui_ctx.pixels_per_point(),
         );
-        ctx.apply_uniforms(&shader::Uniforms {
-            u_screen_size: screen_size_in_points,
-        });
+        ctx.apply_uniforms(miniquad::UniformsSource::table(&screen_size_in_points));
 
         for egui::ClippedPrimitive {
             clip_rect,
@@ -250,7 +265,7 @@ impl Painter {
         mesh: egui::epaint::Mesh,
         egui_ctx: &egui::Context,
     ) {
-        let screen_size_in_pixels = ctx.screen_size();
+        let screen_size_in_pixels = miniquad::window::screen_size();
         let pixels_per_point = egui_ctx.pixels_per_point();
 
         // TODO: support u32 indices in miniquad and just use "mesh.indices" without a need for `split_to_u16`
@@ -258,20 +273,32 @@ impl Painter {
         for mesh in meshes {
             assert!(mesh.is_valid());
             let vertices_size_bytes = mesh.vertices.len() * std::mem::size_of::<Vertex>();
-            if self.bindings.vertex_buffers[0].size() < vertices_size_bytes {
-                self.bindings.vertex_buffers[0].delete();
-                self.bindings.vertex_buffers[0] =
-                    Buffer::stream(ctx, BufferType::VertexBuffer, vertices_size_bytes);
+            if ctx.buffer_size(self.bindings.vertex_buffers[0]) < vertices_size_bytes {
+                ctx.delete_buffer(self.bindings.vertex_buffers[0]);
+                self.bindings.vertex_buffers[0] = ctx.new_buffer(
+                    BufferType::VertexBuffer,
+                    miniquad::BufferUsage::Stream,
+                    miniquad::BufferSource::empty::<usize>(vertices_size_bytes),
+                );
             }
-            self.bindings.vertex_buffers[0].update(ctx, &mesh.vertices);
+            ctx.buffer_update(
+                self.bindings.vertex_buffers[0],
+                miniquad::BufferSource::slice(&mesh.vertices),
+            );
 
             let indices_size_bytes = mesh.indices.len() * std::mem::size_of::<u16>();
-            if self.bindings.index_buffer.size() < indices_size_bytes {
-                self.bindings.index_buffer.delete();
-                self.bindings.index_buffer =
-                    Buffer::stream(ctx, BufferType::IndexBuffer, indices_size_bytes);
+            if ctx.buffer_size(self.bindings.index_buffer) < indices_size_bytes {
+                ctx.delete_buffer(self.bindings.index_buffer);
+                self.bindings.index_buffer = ctx.new_buffer(
+                    BufferType::IndexBuffer,
+                    miniquad::BufferUsage::Stream,
+                    miniquad::BufferSource::empty::<usize>(indices_size_bytes),
+                );
             }
-            self.bindings.index_buffer.update(ctx, &mesh.indices);
+            ctx.buffer_update(
+                self.bindings.index_buffer,
+                miniquad::BufferSource::slice(&mesh.indices),
+            );
 
             self.bindings.images[0] = match mesh.texture_id {
                 egui::TextureId::Managed(id) => {
@@ -282,7 +309,9 @@ impl Painter {
                         continue;
                     }
                 }
-                egui::TextureId::User(id) => unsafe { miniquad::Texture::from_raw_id(id as u32) },
+                egui::TextureId::User(id) => unsafe {
+                    miniquad::TextureId::from_raw_id(miniquad::RawId::OpenGl(id as u32))
+                },
             };
 
             let (width_in_pixels, height_in_pixels) = screen_size_in_pixels;

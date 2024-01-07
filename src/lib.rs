@@ -141,7 +141,7 @@ pub struct EguiMq {
 
 impl EguiMq {
     pub fn new(mq_ctx: &mut mq::Context) -> Self {
-        let native_dpi_scale = mq_ctx.dpi_scale();
+        let native_dpi_scale = miniquad::window::dpi_scale();
         Self {
             native_dpi_scale,
             egui_ctx: egui::Context::default(),
@@ -172,9 +172,9 @@ impl EguiMq {
     ) {
         input::on_frame_start(&mut self.egui_input, &self.egui_ctx, mq_ctx);
 
-        if self.native_dpi_scale != mq_ctx.dpi_scale() {
+        if self.native_dpi_scale != miniquad::window::dpi_scale() {
             // DPI scale change (maybe new monitor?). Tell egui to change:
-            self.native_dpi_scale = mq_ctx.dpi_scale();
+            self.native_dpi_scale = miniquad::window::dpi_scale();
             self.egui_input.pixels_per_point = Some(self.native_dpi_scale);
         }
 
@@ -210,13 +210,13 @@ impl EguiMq {
         }
 
         if cursor_icon == egui::CursorIcon::None {
-            mq_ctx.show_mouse(false);
+            miniquad::window::show_mouse(false);
         } else {
-            mq_ctx.show_mouse(true);
+            miniquad::window::show_mouse(true);
 
             let mq_cursor_icon = to_mq_cursor_icon(cursor_icon);
             let mq_cursor_icon = mq_cursor_icon.unwrap_or(mq::CursorIcon::Default);
-            mq_ctx.set_mouse_cursor(mq_cursor_icon);
+            miniquad::window::set_mouse_cursor(mq_cursor_icon);
         }
 
         if !copied_text.is_empty() {
@@ -362,12 +362,12 @@ impl EguiMq {
 
     #[cfg(not(target_os = "macos"))]
     fn set_clipboard(&mut self, mq_ctx: &mut mq::Context, text: String) {
-        mq_ctx.clipboard_set(&text);
+        miniquad::window::clipboard_set(&text);
     }
 
     #[cfg(not(target_os = "macos"))]
     fn get_clipboard(&mut self, mq_ctx: &mut mq::Context) -> Option<String> {
-        mq_ctx.clipboard_get()
+        miniquad::window::clipboard_get()
     }
 
     #[cfg(target_os = "macos")]
